@@ -1,0 +1,29 @@
+id,title,time_slot,difficulty,problem_statement,starter_code,test_cases,expected_output,hints
+15001,Multiply Two Numbers,15,easy,Return product of two numbers.,"def multiply(a,b): return a+b","(2,3);(4,5);(0,10);(-2,3)",6;20;0;-6,Check operator
+15002,Absolute Value,15,easy,Return absolute value.,def abs_val(x): return x,-5;3;0,5;3;0,Handle negatives
+15003,Even or Odd,15,easy,Check if number is even.,def is_even(x): return x%2==1,2;3;0,True;False;True,Check modulus
+15004,Min of Two,15,easy,Return minimum.,"def min_two(a,b): return a if a>b else b","(2,3);(5,1)",2;1,Comparison logic
+15005,Square Number,15,easy,Return square.,def square(x): return x*x*x,2;3,4;9,Power mistake
+15006,Sum of Two Numbers,15,easy,Write a function that returns the sum of two integers.,"def add(a, b):
+    return a - b","(2,3);(10,5);(-4,6);(0,0)",5;15;2;0,One operator is wrong
+30001,Count Vowels,30,medium,Count vowels in string.,def count_vowels(s): return sum(1 for c in s if c in 'aeiou'),"""hello"";""AEIOU""",2;5,Case sensitivity
+30002,Second Largest,30,medium,Find second largest.,def second_largest(arr): return sorted(arr)[-2],"[1,2,3];[5,5,5]",2;5,Duplicates
+30003,Prime Check,30,medium,Check if prime.,"def is_prime(n): return all(n%i!=0 for i in range(2,n))",2;9,True;False,Edge case
+30004,Factorial,30,medium,Compute factorial.,"def fact(n):
+    if n==1:
+        return 1
+    return n*fact(n-1)",5,120,Missing base
+30005,Binary Search,30,medium,Binary search in list.,"def bs(arr,x): return x in arr","[1,2,3],2",1,Index expected
+30006,Palindrome Check,30,medium,Check if a string is a palindrome. Ignore spaces and case.,"def is_palindrome(s):\n    s = s.replace("" "", """")\n    return s == s[::-1]","""racecar"";""Race car"";""hello"";""A man a plan a canal Panama""",True;True;False;True,Convert the string to one case before comparing
+45001,Two Sum,45,hard,Find indices of sum.,"def two_sum(arr,t):
+ for i in arr:
+  for j in arr:
+   if i+j==t: return i,j","[1,2,3],5","(2,3)",Return indices
+45002,Fibonacci,45,hard,Nth fib.,"def fib(n):
+    if n <= 1:
+        return n
+    return fib(n-1)+fib(n-2)",5,5,Base missing
+45003,Rotate Array,45,hard,Rotate right.,def rotate(arr): return arr[1:]+arr[:1],"[1,2,3]","[3,1,2]",Wrong direction
+45004,Balanced Parentheses,45,hard,Check balance.,def balanced(s): return s.count('(')==s.count(')'),"""(()""",False,Order matters
+45005,Max Subarray,45,hard,Max sum.,def max_sub(arr): return sum(arr),"[1,-2,3]",3,Kadane needed
+45006,Find Maximum in List,45,hard,Return the maximum number in a list.,def find_max(arr):\n    max_val = 0\n    for x in arr:\n        if x > max_val:\n            max_val = x\n    return max_val,"[1,2,3,4];[-5,-2,-10];[0,-1,-2];[100]",4;-2;0;100,Consider how you initialize max_val

@@ -1,0 +1,8 @@
+{
+  "/battle/page": "app/battle/page.js",
+  "/matchmaking/page": "app/matchmaking/page.js",
+  "/page": "app/page.js",
+  "/profile/page": "app/profile/page.js",
+  "/result/page": "app/result/page.js",
+  "/signup/page": "app/signup/page.js"
+}
