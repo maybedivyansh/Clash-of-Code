@@ -26,7 +26,7 @@ const ProfilePage = () => {
                 // Fetch from our new backend API
                 // Assuming backend is on localhost:4000 based on previous context
                 // In production this URL should be environmental
-                const res = await fetch(`http://localhost:4000/api/user/${authUser.id}/profile`);
+                const res = await fetch(`/api/user/${authUser.id}/profile`);
 
                 if (res.ok) {
                     const data = await res.json();

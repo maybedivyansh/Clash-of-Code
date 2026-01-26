@@ -1,21 +1,24 @@
 'use client';
 
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useState, useRef } from 'react';
 import { useRouter } from 'next/navigation';
-import socket from '@/lib/socket';
+import { supabase } from '@/lib/supabase';
 import CodeEditor from '@/components/Editor';
 import HealthBar from '@/components/HealthBar';
 import Timer from '@/components/Timer';
 import OutputPanel from '@/components/OutputPanel';
 import { useAuth } from '@/context/AuthContext';
 import { Loader2 } from 'lucide-react';
+import { getRatingChange } from '@/lib/elo';
 
 const Battle = () => {
     const router = useRouter();
     const { getActiveUser } = useAuth();
 
     const [matchData, setMatchData] = useState(null);
-    const [userId, setUserId] = useState(null);
+
+    const user = getActiveUser();
+    const userId = user?.id;
 
     const [code, setCode] = useState("# Write your code here\n");
     const [opponentCode, setOpponentCode] = useState("# Opponent is thinking...\n");
@@ -27,89 +30,214 @@ const Battle = () => {
     const [myHealth, setMyHealth] = useState(100);
     const [oppHealth, setOppHealth] = useState(100);
 
+    const channelRef = useRef(null);
+
     useEffect(() => {
         // Hydrate from Session
-        const user = getActiveUser();
-        if (user) setUserId(user.id);
-
         if (typeof window !== 'undefined') {
             const stored = sessionStorage.getItem('currentMatch');
             if (stored) {
                 const parsed = JSON.parse(stored);
-                setMatchData(parsed);
-                if (parsed.question?.starter_code) {
-                    setCode(parsed.question.starter_code);
-                }
+                // Defer state update to avoid synchronous render warning
+                setTimeout(() => {
+                    setMatchData(parsed);
+                    if (parsed.question?.starter_code) {
+                        setCode(parsed.question.starter_code);
+                    }
+                }, 0);
             } else {
                 router.push('/');
             }
         }
-    }, [getActiveUser, router]);
+    }, [router]);
 
-    // Determine Identity
-    const isPlayer1 = matchData && userId ? matchData.p1.userId === userId : false;
+    // Determine Identity safely
+    const isPlayer1 = matchData && userId ? matchData?.p1?.userId === userId : false;
 
+    // Realtime Subscription
     useEffect(() => {
         if (!matchData || !userId) return;
 
-        const onGameUpdate = (game) => {
-            const me = game.p1.id === userId ? game.p1 : game.p2;
-            const opp = game.p1.id === userId ? game.p2 : game.p1;
-            setMyHealth(me.health);
-            setOppHealth(opp.health);
-        };
+        const channelName = `match_${matchData.matchId}`;
+        const channel = supabase.channel(channelName);
 
-        const onExecutionResult = (res) => {
-            setLoading(false);
-            setOutput(res.results);
-            setError(null);
-        };
+        channel
+            .on(
+                'broadcast',
+                { event: 'code_update' },
+                ({ payload }) => {
+                    if (payload.userId !== userId) {
+                        setOpponentCode(payload.code);
+                    }
+                }
+            )
+            .subscribe((status) => {
+                if (status === 'SUBSCRIBED') {
+                    // console.log("Joined Match Channel");
+                }
+            });
 
-        const onExecutionError = (err) => {
-            setLoading(false);
-            setError(typeof err === 'string' ? err : 'Runtime Error');
-        };
+        channelRef.current = channel;
 
-        const onGameOver = ({ winnerId, ratingChange }) => {
-            console.log("OnGameOver Received:", { winnerId, ratingChange, type: typeof ratingChange });
-            router.push(`/result?winnerId=${winnerId}&ratingChange=${ratingChange}`);
-        };
+        // DB Subscription for Game State
+        const dbChannel = supabase.channel(`match_db_${matchData.matchId}`)
+            .on(
+                'postgres_changes',
+                {
+                    event: 'UPDATE',
+                    schema: 'public',
+                    table: 'matches',
+                    filter: `id=eq.${matchData.matchId}`
+                },
+                (payload) => {
+                    const row = payload.new;
+                    // Update Health
+                    if (isPlayer1) {
+                        setMyHealth(row.p1_health);
+                        setOppHealth(row.p2_health);
+                        if (row.p1_health <= 0) {
+                            // Immedately redirect me to defeat screen
+                            const delta = getRatingChange(matchData.duration, false);
+                            router.push(`/result?winnerId=${matchData.p2.userId}&ratingChange=${delta}`);
+                        }
+                    } else {
+                        setMyHealth(row.p2_health);
+                        setOppHealth(row.p1_health);
+                        if (row.p2_health <= 0) {
+                            // Immedately redirect me to defeat screen
+                            const delta = getRatingChange(matchData.duration, false);
+                            router.push(`/result?winnerId=${matchData.p1.userId}&ratingChange=${delta}`);
+                        }
+                    }
 
-        const onOpponentCodeUpdate = ({ code }) => {
-            setOpponentCode(code);
-        };
+                    // Check Status
+                    if (row.status === 'finished' || row.status.startsWith('finished')) {
+                        // Redirect to result
+                        // We need rating change info. 
+                        // It's not in the row, but we can infer or fetch.
+                        // Actually, api/submit returns it.
+                        // But what if opponent triggered end?
+                        // We can just redirect to result page and let it fetch diff?
+                        // The existing Result page expects query params.
+                        // We might need to fetch the User's updated rating to calc delta or pass it?
+                        // Simplest: Redirect to /result?winnerId=...
+                        // Result page logic needs to handle serverless fetch if params are missing?
+                        // Or we can just pass what we know.
 
-        socket.on('game_update', onGameUpdate);
-        socket.on('execution_result', onExecutionResult);
-        socket.on('execution_error', onExecutionError);
-        socket.on('game_over', onGameOver);
-        socket.on('opponent_code_update', onOpponentCodeUpdate);
+                        console.log("Game Over. Status:", row.status);
+                        // router.push(`/result?winnerId=${row.winner_id}&ratingChange=0`); // Delta might be missing here
+                        // Better: The user who finished it got the delta. The other one needs to know.
+                        // We could store delta in matches table? No.
+                        // We can fetch our own last rating change??
+                        // For MVP: Just redirect. Result page might show static "Updated".
+                        // Wait, previous Result page used params.
+
+                        // We can assume standard ELO if not passed?
+                        // Or we can put listener logic to WAIT for a "game_over" broadcast if we want precise numbers?
+                        // Let's rely on DB update.
+                        router.push(`/result?winnerId=${row.winner_id}`);
+                    }
+                }
+            )
+            .subscribe();
 
         return () => {
-            socket.off('game_update', onGameUpdate);
-            socket.off('execution_result', onExecutionResult);
-            socket.off('execution_error', onExecutionError);
-            socket.off('game_over', onGameOver);
-            socket.off('opponent_code_update', onOpponentCodeUpdate);
+            supabase.removeChannel(channel);
+            supabase.removeChannel(dbChannel);
         };
-    }, [matchData, router, userId]);
+    }, [matchData, userId, isPlayer1, router]);
 
-    // Emit code changes
+    // Polling Fallback to ensure game end is detected
+    useEffect(() => {
+        if (!matchData?.matchId) return;
+
+        const checkStatus = async () => {
+            const { data, error } = await supabase
+                .from('matches')
+                .select('status, winner_id')
+                .eq('id', matchData.matchId)
+                .single();
+
+            if (data && (data.status === 'finished' || data.status === 'finished_double_loss')) {
+                console.log("Polling detected Game Over:", data.status);
+
+                // Determine Winner
+                const isWinner = data.winner_id === userId;
+                // Calculate Expected Delta
+                const delta = getRatingChange(matchData.duration, isWinner);
+
+                router.push(`/result?winnerId=${data.winner_id}&ratingChange=${delta}`);
+            }
+        };
+
+        const interval = setInterval(checkStatus, 3000); // Check every 3 seconds
+        return () => clearInterval(interval);
+    }, [matchData?.matchId, router]);
+
+    // Emit code changes (Broadcast)
     const handleCodeChange = (newCode) => {
         setCode(newCode);
-        socket.emit('code_update', { matchId: matchData.matchId, code: newCode });
+        if (channelRef.current) {
+            channelRef.current.send({
+                type: 'broadcast',
+                event: 'code_update',
+                payload: { userId, code: newCode }
+            });
+        }
     };
 
-    const handleRun = () => {
+    const handleRun = async () => {
         if (!matchData) return;
         setLoading(true);
         setOutput(null);
         setError(null);
-        socket.emit('submit_code', {
-            matchId: matchData.matchId,
-            userId,
-            code
-        });
+
+        try {
+            const res = await fetch('/api/match/submit', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    matchId: matchData.matchId,
+                    userId,
+                    code
+                })
+            });
+            const data = await res.json();
+            setLoading(false);
+
+            if (data.error) {
+                setError(data.error);
+                // Handle Elimination
+                // Handle Elimination or Finished State
+                if (data.action === 'eliminated' || data.action === 'timeout' || data.action === 'finished') {
+                    // Force redirect if backend says it's over
+                    if (data.action === 'finished') {
+                        // We might not know the winner ID here easily if we are late, but we can guess or fetch.
+                        // For now, let the DB listener pick it up, or if we want immediate:
+                        // router.push('/result'); // Missing params
+                        // Better to just return and let the DB listener fire? 
+                        // Or trigger a manual fetch of the match state?
+                        // Let's rely on the DB listener which should fire momentarily.
+                        return;
+                    }
+                }
+                return;
+            }
+
+            if (data.result) {
+                setOutput(data.result.results);
+            }
+
+            if (data.action === 'win') {
+                // We won!
+                const { winnerDelta } = data;
+                router.push(`/result?winnerId=${userId}&ratingChange=${winnerDelta}`);
+            }
+
+        } catch (e) {
+            setLoading(false);
+            setError("Submission Error");
+        }
     };
 
     if (!matchData || !userId) {
@@ -120,11 +248,9 @@ const Battle = () => {
         );
     }
 
+    // Identical UI Logic
     const p1Code = isPlayer1 ? code : opponentCode;
     const p2Code = isPlayer1 ? opponentCode : code;
-
-    const setP1Code = isPlayer1 ? handleCodeChange : () => { };
-    const setP2Code = isPlayer1 ? () => { } : handleCodeChange;
 
     return (
         <div className="h-screen w-full flex bg-[#030712] text-white overflow-hidden font-sans relative selection:bg-cyan-500/30">

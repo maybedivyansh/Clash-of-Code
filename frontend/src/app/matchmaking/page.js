@@ -1,8 +1,8 @@
 'use client';
 
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useState, useRef } from 'react';
 import { useRouter } from 'next/navigation';
-import socket from '@/lib/socket';
+import { supabase } from '@/lib/supabase';
 import { useAuth } from '@/context/AuthContext';
 import { Loader2, Swords, Clock, User, ShieldAlert } from 'lucide-react';
 
@@ -20,102 +20,199 @@ const Matchmaking = () => {
     const [joinCode, setJoinCode] = useState('');
     const [error, setError] = useState(null);
 
-    useEffect(() => {
-        if (loading) return;
+    // Subscription ref to unsubscribe
+    const subscriptionRef = useRef(null);
 
-        const user = getActiveUser();
-        if (!user) {
-            router.push('/');
-            return;
+    const cleanupSubscription = () => {
+        if (subscriptionRef.current) {
+            supabase.removeChannel(subscriptionRef.current);
+            subscriptionRef.current = null;
+        }
+    };
+
+    useEffect(() => {
+        return () => {
+            cleanupSubscription();
+        };
+    }, []);
+
+    const handleMatchFound = (data) => {
+        console.log('Match found!', data);
+        cleanupSubscription();
+
+        // Close any overlays
+        setShowJoinInput(false);
+        setRoomCode(null);
+
+        // Save match data for Battle page
+        if (typeof window !== 'undefined') {
+            sessionStorage.setItem('currentMatch', JSON.stringify(data));
         }
 
-        const onMatchFound = (data) => {
-            console.log('Match found!', data);
+        setOpponentInfo({
+            name: data.opponentIdentifier || 'Opponent', // We might not have identifier yet, API returns opponentId
+            id: data.opponentId
+        });
+        setStatus('found');
 
-            // Close any overlays
-            setShowJoinInput(false);
-            setRoomCode(null);
-
-            // Save match data for Battle page
-            if (typeof window !== 'undefined') {
-                sessionStorage.setItem('currentMatch', JSON.stringify(data));
+        let count = 3;
+        const interval = setInterval(() => {
+            count--;
+            setMatchCountdown(count);
+            if (count <= 0) {
+                clearInterval(interval);
+                router.push('/battle');
             }
+        }, 1000);
+    };
 
-            setOpponentInfo({
-                name: data.opponentIdentifier || 'Unknown Opponent',
-                id: data.opponentId
-            });
-            setStatus('found');
+    const subscribeToMatchUpdates = (userId) => {
+        if (subscriptionRef.current) return;
 
-            let count = 3;
-            const interval = setInterval(() => {
-                count--;
-                setMatchCountdown(count);
-                console.log("Match Countdown:", count);
-                if (count <= 0) {
-                    clearInterval(interval);
-                    console.log("Redirecting to /battle...");
-                    router.push('/battle');
+        // Listen for new matches where I am a player
+        const channel = supabase
+            .channel('match_search')
+            .on(
+                'postgres_changes',
+                {
+                    event: 'INSERT',
+                    schema: 'public',
+                    table: 'matches',
+                    filter: `player1_id=eq.${userId}`
+                },
+                async (payload) => {
+                    handleMatchFoundRealtime(payload.new, userId);
                 }
-            }, 1000);
+            )
+            .on(
+                'postgres_changes',
+                {
+                    event: 'INSERT',
+                    schema: 'public',
+                    table: 'matches',
+                    filter: `player2_id=eq.${userId}`
+                },
+                async (payload) => {
+                    handleMatchFoundRealtime(payload.new, userId);
+                }
+            )
+            .subscribe((status) => {
+                console.log("Subscription status:", status);
+            });
+
+        subscriptionRef.current = channel;
+    };
+
+    const handleMatchFoundRealtime = async (matchRow, myId) => {
+        // We need to fetch full match details including question
+        const opponentId = matchRow.player1_id === myId ? matchRow.player2_id : matchRow.player1_id;
+
+        // Fetch question
+        const { data: question } = await supabase.from('questions').select('*').eq('id', matchRow.question_id).single();
+
+        const matchData = {
+            matchId: matchRow.id,
+            opponentId: opponentId,
+            question: question,
+            startTime: new Date(matchRow.created_at).getTime(),
+            duration: matchRow.duration,
+            p1: { userId: matchRow.player1_id },
+            p2: { userId: matchRow.player2_id }
         };
 
-        const onRoomCreated = ({ code }) => {
-            setRoomCode(code);
-            setStatus('creating_room');
-        };
+        handleMatchFound(matchData);
+    };
 
-        const onRoomError = ({ message }) => {
-            setError(message);
-            setTimeout(() => setError(null), 3000);
-        };
-
-        socket.on('match_found', onMatchFound);
-        socket.on('private_room_created', onRoomCreated);
-        socket.on('private_room_error', onRoomError);
-
-        return () => {
-            socket.off('match_found', onMatchFound);
-            socket.off('private_room_created', onRoomCreated);
-            socket.off('private_room_error', onRoomError);
-        };
-    }, [router, getActiveUser, loading]);
-
-    const joinQueue = (duration) => {
+    const joinQueue = async (duration) => {
         const user = getActiveUser();
         if (!user) return;
 
-        setSelectedDuration(duration);
         setStatus('searching');
-        socket.emit('join_queue', {
-            userId: user.id,
-            duration,
-            isGuest: user.isGuest
-        });
+        setError(null);
+
+        try {
+            const res = await fetch('/api/match/join', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    userId: user.id,
+                    duration,
+                    rating: user.rating || 1000,
+                    mode: 'public'
+                })
+            });
+            const data = await res.json();
+
+            if (data.status === 'found') {
+                handleMatchFound(data);
+            } else if (data.status === 'queued') {
+                // Subscribe to wait
+                subscribeToMatchUpdates(user.id);
+            } else {
+                setError(data.error || 'Failed to join queue');
+                setStatus('idle');
+            }
+        } catch (e) {
+            console.error(e);
+            setError('Network error');
+            setStatus('idle');
+        }
     };
 
-    const createRoom = () => {
+    const createRoom = async () => {
         const user = getActiveUser();
         if (!user || !selectedDuration) return;
 
-        // Don't set status to searching, set specific room creation interaction logic handled by response
-        socket.emit('create_private_room', {
-            userId: user.id,
-            duration: selectedDuration,
-            rating: user.rating || 1000 // Send rating if available (guest 800) handled in backend
-        });
+        try {
+            const res = await fetch('/api/match/join', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    userId: user.id,
+                    duration: selectedDuration,
+                    rating: user.rating,
+                    mode: 'create_private'
+                })
+            });
+            const data = await res.json();
+            if (data.status === 'created') {
+                setRoomCode(data.code);
+                setStatus('creating_room');
+                subscribeToMatchUpdates(user.id); // Wait for someone to join
+            } else {
+                setError(data.error);
+            }
+
+        } catch (e) {
+            setError(e.message);
+        }
     };
 
-    const joinRoom = () => {
+    const joinRoom = async () => {
         const user = getActiveUser();
         if (!user || !joinCode) return;
 
         setError(null);
-        socket.emit('join_private_room', {
-            userId: user.id,
-            code: joinCode,
-            rating: user.rating || 1000
-        });
+        try {
+            const res = await fetch('/api/match/join', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    userId: user.id,
+                    code: joinCode,
+                    mode: 'join_private'
+                })
+            });
+            const data = await res.json();
+
+            if (data.status === 'found') {
+                handleMatchFound(data);
+            } else {
+                setError(data.error || 'Failed to join');
+            }
+        } catch (e) {
+            setError('Network error');
+        }
     };
 
     if (loading) return null;
@@ -160,6 +257,7 @@ const Matchmaking = () => {
                             <span>•</span>
                             <span>Region: Global</span>
                         </div>
+                        {error && <p className="text-red-500 text-xs mt-4">{error}</p>}
                     </div>
                 )}
 
@@ -236,6 +334,7 @@ const Matchmaking = () => {
                                 </span>
                             </button>
                         </div>
+                        {error && <p className="text-red-500 mt-4">{error}</p>}
                     </div>
                 )}
 
@@ -270,16 +369,6 @@ const Matchmaking = () => {
                                 ))}
                             </div>
 
-                            <div className="flex flex-col items-center gap-2 mb-8 w-full">
-                                <div className="text-gray-500 text-xs uppercase tracking-widest">Room Access Code</div>
-                                <div className="text-4xl font-mono font-bold text-gray-700 tracking-[0.5em] select-none">
-                                    XXXXX
-                                </div>
-                                <div className="text-xs text-gray-600 flex items-center gap-1">
-                                    (Generated upon creation)
-                                </div>
-                            </div>
-
                             <button
                                 onClick={createRoom}
                                 disabled={!selectedDuration}
@@ -312,7 +401,11 @@ const Matchmaking = () => {
                         </div>
 
                         <button
-                            onClick={() => { setStatus('idle'); setRoomCode(null); }}
+                            onClick={() => {
+                                setStatus('idle');
+                                setRoomCode(null);
+                                cleanupSubscription();
+                            }}
                             className="mt-8 text-xs text-red-400 hover:text-red-300 underline relative z-10"
                         >
                             Abort Protocol
