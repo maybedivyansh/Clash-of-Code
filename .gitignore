@@ -1,0 +1,24 @@
+# Dependencies
+node_modules/
+.pnpm-store/
+
+# Build outputs
+.next/
+dist/
+build/
+out/
+
+# Environment files
+.env
+.env*.local
+.env.local
+
+# Large datasets & keys
+leetcode-problems/
+downloads
+downloads.pub
+
+# Operating System files
+.DS_Store
+Thumbs.db
+*.log
